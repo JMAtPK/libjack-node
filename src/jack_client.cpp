@@ -45,10 +45,12 @@ private:
   std::atomic<bool> shutdown_{false};
 
   // Shared memory for audio I/O between RT thread and JS
-  // Input ports: RT thread writes captured audio here
-  // Output ports: JS writes audio here, RT thread reads it
+  // Buffers are owned by V8 ArrayBuffers (not C++ new[]) to avoid
+  // "External buffers are not allowed" in Node.js 22+.
   float* input_buffer_ = nullptr;   // RT writes, JS reads
   float* output_buffer_ = nullptr;  // JS writes, RT reads
+  Napi::Reference<Napi::ArrayBuffer> input_ab_ref_;
+  Napi::Reference<Napi::ArrayBuffer> output_ab_ref_;
   uint32_t input_channels_ = 0;
   uint32_t output_channels_ = 0;
   uint32_t max_frames_ = 0;
@@ -111,8 +113,9 @@ JackClient::~JackClient() {
     jack_client_close(client_);
     client_ = nullptr;
   }
-  delete[] input_buffer_;
-  delete[] output_buffer_;
+  // Buffers are owned by V8 ArrayBuffers — released when refs are dropped
+  input_buffer_ = nullptr;
+  output_buffer_ = nullptr;
 }
 
 // ─── Properties ─────────────────────────────────────────────────
@@ -172,33 +175,34 @@ Napi::Value JackClient::RegisterPort(const Napi::CallbackInfo& info) {
 Napi::Value JackClient::SetProcessBuffer(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
-  // Allocate interleaved buffers: channels * max_frames
-  // Input buffer: RT thread deinterleaves JACK port buffers into this
-  // Output buffer: JS fills this, RT thread writes to JACK port buffers
-  delete[] input_buffer_;
-  delete[] output_buffer_;
+  // Release previous buffer references
+  input_buffer_ = nullptr;
+  output_buffer_ = nullptr;
+  input_ab_ref_.Reset();
+  output_ab_ref_.Reset();
 
-  if (input_channels_ > 0) {
-    input_buffer_ = new float[input_channels_ * max_frames_]();
-  }
-  if (output_channels_ > 0) {
-    output_buffer_ = new float[output_channels_ * max_frames_]();
-  }
-
-  // Return buffer info as ArrayBuffers that JS can read/write
   Napi::Object result = Napi::Object::New(env);
 
-  if (input_buffer_) {
-    result.Set("inputBuffer", Napi::ArrayBuffer::New(
-      env, input_buffer_, input_channels_ * max_frames_ * sizeof(float)
-    ));
+  // Allocate buffers through V8 (not C++ new[]) to avoid
+  // "External buffers are not allowed" in Node.js 22+.
+  // V8-owned ArrayBuffers can be safely wrapped in Float32Array.
+  if (input_channels_ > 0) {
+    size_t byteLen = input_channels_ * max_frames_ * sizeof(float);
+    auto ab = Napi::ArrayBuffer::New(env, byteLen);
+    input_buffer_ = static_cast<float*>(ab.Data());
+    memset(input_buffer_, 0, byteLen);
+    input_ab_ref_ = Napi::Persistent(ab);  // prevent GC
+    result.Set("inputBuffer", ab);
     result.Set("inputChannels", Napi::Number::New(env, input_channels_));
   }
 
-  if (output_buffer_) {
-    result.Set("outputBuffer", Napi::ArrayBuffer::New(
-      env, output_buffer_, output_channels_ * max_frames_ * sizeof(float)
-    ));
+  if (output_channels_ > 0) {
+    size_t byteLen = output_channels_ * max_frames_ * sizeof(float);
+    auto ab = Napi::ArrayBuffer::New(env, byteLen);
+    output_buffer_ = static_cast<float*>(ab.Data());
+    memset(output_buffer_, 0, byteLen);
+    output_ab_ref_ = Napi::Persistent(ab);  // prevent GC
+    result.Set("outputBuffer", ab);
     result.Set("outputChannels", Napi::Number::New(env, output_channels_));
   }
 
