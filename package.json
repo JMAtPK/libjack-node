@@ -15,7 +15,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/AtotheY/libjack-node.git"
+    "url": "https://github.com/JMAtPK/libjack-node.git"
   },
   "engines": {
     "node": ">=18.0.0"
